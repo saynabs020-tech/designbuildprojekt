@@ -70,6 +70,7 @@
       font-size: 16px;
       padding: 11px 16px;
       cursor: pointer;
+      border-radius: 4px;
     }
 
     .start, .green {
@@ -85,7 +86,6 @@
       font-size: 13px;
       padding: 7px 12px;
       margin-bottom: 8px;
-      border-radius: 4px;
     }
 
     #startBtn {
@@ -238,15 +238,11 @@
       </div>
 
       <div class="status" id="statusText">
-        Klar til første måling
+        Klar til måling
       </div>
 
       <div class="buttons">
-        <button id="measureBtn" class="green" onclick="takeMeasurement()">
-          Tag måling
-        </button>
-
-        <button id="againBtn" class="red hidden" onclick="resetMeasurements()">
+        <button id="againBtn" class="red hidden" onclick="resetAndMeasureAgain()">
           Mål igen
         </button>
 
@@ -263,12 +259,11 @@
     let selectedDay = "";
     let selectedTime = "";
     let measurementIndex = 0;
+    let measurements = [];
 
-    const fakeMeasurements = [
-      { sys: 128, dia: 83, puls: 69 },
-      { sys: 126, dia: 81, puls: 71 },
-      { sys: 122, dia: 77, puls: 65 }
-    ];
+    let port;
+    let reader;
+    let writer;
 
     function selectDay(element) {
       document.querySelectorAll(".day").forEach(day => {
@@ -296,7 +291,19 @@
       }
     }
 
-    function startPage() {
+    async function connectDevice() {
+      if (!("serial" in navigator)) {
+        alert("Denne funktion virker kun i Google Chrome eller Microsoft Edge.");
+        return false;
+      }
+
+      port = await navigator.serial.requestPort();
+      await port.open({ baudRate: 9600 });
+
+      return true;
+    }
+
+    async function startPage() {
       resetMeasurements();
 
       document.getElementById("page1").classList.add("hidden");
@@ -304,44 +311,121 @@
 
       document.getElementById("title").innerHTML =
         selectedDay + "<br>" + selectedTime;
+
+      document.getElementById("statusText").innerText =
+        "Målingen starter...";
+
+      await startMeasurement();
     }
 
-    function takeMeasurement() {
-      if (measurementIndex >= 3) return;
+    async function startMeasurement() {
+      try {
+        if (!port) {
+          let connected = await connectDevice();
 
-      document.getElementById("statusText").innerText = "Måler...";
-
-      setTimeout(() => {
-        const data = fakeMeasurements[measurementIndex];
-        const boxId = "m" + (measurementIndex + 1);
-
-        document.getElementById(boxId).classList.remove("empty");
-        document.getElementById(boxId).innerHTML = `
-          <p>${data.sys}</p>
-          <p>${data.dia}</p>
-          <p>${data.puls}</p>
-        `;
-
-        measurementIndex++;
-
-        if (measurementIndex < 3) {
-          document.getElementById("statusText").innerText =
-            "Måling " + measurementIndex + " gemt. Tag næste måling.";
-        } else {
-          calculateAverage();
-          document.getElementById("statusText").innerText =
-            "Alle målinger er færdige.";
-          document.getElementById("measureBtn").classList.add("hidden");
-          document.getElementById("againBtn").classList.remove("hidden");
-          document.getElementById("sendBtn").classList.remove("hidden");
+          if (!connected) {
+            document.getElementById("statusText").innerText =
+              "Målingen kunne ikke startes.";
+            return;
+          }
         }
-      }, 1000);
+
+        const textDecoder = new TextDecoderStream();
+        port.readable.pipeTo(textDecoder.writable);
+        reader = textDecoder.readable.getReader();
+
+        writer = port.writable.getWriter();
+        await writer.write(new TextEncoder().encode("START\n"));
+        writer.releaseLock();
+
+        document.getElementById("statusText").innerText =
+          "Blodtrykket måles. Vent venligst...";
+
+        let buffer = "";
+
+        while (true) {
+          const { value, done } = await reader.read();
+
+          if (done) break;
+
+          buffer += value;
+          let lines = buffer.split("\n");
+
+          buffer = lines.pop();
+
+          for (let line of lines) {
+            line = line.trim();
+
+            if (line === "") continue;
+
+            if (line === "FÆRDIG") {
+              reader.releaseLock();
+
+              calculateAverage();
+
+              document.getElementById("statusText").innerText =
+                "Alle målinger er færdige.";
+
+              document.getElementById("againBtn").classList.remove("hidden");
+              document.getElementById("sendBtn").classList.remove("hidden");
+
+              return;
+            }
+
+            let parts = line.split(",");
+
+            if (parts.length === 3) {
+              let sys = Number(parts[0]);
+              let dia = Number(parts[1]);
+              let puls = Number(parts[2]);
+
+              measurementIndex++;
+
+              measurements.push({
+                sys: sys,
+                dia: dia,
+                puls: puls
+              });
+
+              let boxId = "m" + measurementIndex;
+
+              document.getElementById(boxId).classList.remove("empty");
+              document.getElementById(boxId).innerHTML = `
+                <p>${sys}</p>
+                <p>${dia}</p>
+                <p>${puls}</p>
+              `;
+
+              document.getElementById("statusText").innerText =
+                "Måling " + measurementIndex + " gennemført.";
+            }
+          }
+        }
+
+      } catch (error) {
+        console.error(error);
+
+        document.getElementById("statusText").innerText =
+          "Der opstod en fejl. Prøv igen.";
+
+        alert("Målingen kunne ikke gennemføres. Prøv igen.");
+      }
     }
 
     function calculateAverage() {
-      let sysAvg = Math.round((128 + 126 + 122) / 3);
-      let diaAvg = Math.round((83 + 81 + 77) / 3);
-      let pulsAvg = Math.round((69 + 71 + 65) / 3);
+      if (measurements.length === 0) return;
+
+      let sysAvg = Math.round(
+        measurements.reduce((sum, m) => sum + m.sys, 0) / measurements.length
+      );
+
+      let diaAvg = Math.round(
+        measurements.reduce((sum, m) => sum + m.dia, 0) / measurements.length
+      );
+
+      let pulsAvg = Math.round(
+        measurements.reduce((sum, m) => sum + m.puls, 0) / measurements.length
+      );
 
       document.getElementById("average").innerHTML = `
         Gennemsnit<br>
@@ -351,6 +435,7 @@
 
     function resetMeasurements() {
       measurementIndex = 0;
+      measurements = [];
 
       for (let i = 1; i <= 3; i++) {
         document.getElementById("m" + i).classList.add("empty");
@@ -366,10 +451,18 @@
         (...)
       `;
 
-      document.getElementById("statusText").innerText = "Klar til første måling";
-      document.getElementById("measureBtn").classList.remove("hidden");
+      document.getElementById("statusText").innerText =
+        "Klar til måling";
+
       document.getElementById("againBtn").classList.add("hidden");
       document.getElementById("sendBtn").classList.add("hidden");
+    }
+
+    async function resetAndMeasureAgain() {
+      resetMeasurements();
+      document.getElementById("statusText").innerText =
+        "Ny måling starter...";
+      await startMeasurement();
     }
 
     function goBack() {
